@@ -213,7 +213,7 @@ footer .wrap{font-size:.75rem; color:var(--muted); display:flex; justify-content
 
     <div class="panel">
       <div class="chart-head">
-        <h3>Normalized performance &mdash; trailing 1 year (indexed to 100)</h3>
+        <h3 id="chartTitle">Normalized performance &mdash; trailing 1 year (indexed to 100)</h3>
         <button class="toggle-table" id="toggleTableBtn">View as table</button>
       </div>
       <div class="chart-box" id="chartBox"></div>
@@ -255,6 +255,9 @@ footer .wrap{font-size:.75rem; color:var(--muted); display:flex; justify-content
     {name:"Dow Jones Industrial", tickers:["AAPL","MSFT","JPM","V","UNH","HD"]},
     {name:"S&P 500", tickers:["SPY"]}
   ];
+
+  var lastPerTicker = null, lastGoodTickers = null, lastPortfolio = null;
+  var lastIsMobile = null;
 
   var tickerInput = document.getElementById("tickerInput");
   var amountInput = document.getElementById("amountInput");
@@ -472,6 +475,124 @@ footer .wrap{font-size:.75rem; color:var(--muted); display:flex; justify-content
     });
   }
 
+  // Mobile view: a donut chart, one wedge per ticker (sized by magnitude of
+  // its 1yr return, colored by the same series colors as the desktop line
+  // chart) with the equal-weighted portfolio return in the center. Easier to
+  // scan on a small screen than overlapping lines, and each "pick" reads as
+  // its own separated slice rather than a crossing line.
+  function renderPieChart(perTicker, tickers, portfolio){
+    var box = document.getElementById("chartBox");
+    var legend = document.getElementById("chartLegend");
+    box.innerHTML = ""; legend.innerHTML = "";
+
+    var W = box.clientWidth || 320, H = 300;
+    var cx = W/2, cy = H/2;
+    var R = Math.max(60, Math.min(W, H)/2 - 20);
+    var r = R * 0.58;
+    var svgNS = "http://www.w3.org/2000/svg";
+    var svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("height", H);
+    svg.style.display = "block";
+
+    var rets = tickers.map(function(t){
+      var norm = perTicker[t].normalized;
+      return norm[norm.length - 1] - 100; // total return, in points, over the period
+    });
+    var mags = rets.map(function(v){ return Math.max(Math.abs(v), 0.5); });
+    var total = mags.reduce(function(a,b){ return a+b; }, 0) || 1;
+
+    box.style.position = "relative";
+    var tooltip = document.createElement("div");
+    tooltip.className = "tooltip";
+
+    var angle = -Math.PI/2;
+    tickers.forEach(function(t, idx){
+      var frac = mags[idx] / total;
+      var sweep = frac * Math.PI * 2;
+      var a0 = angle, a1 = angle + sweep;
+      angle = a1;
+      var color = cssVar(SERIES_COLORS[idx % SERIES_COLORS.length]);
+
+      var x1 = cx + R*Math.cos(a0), y1 = cy + R*Math.sin(a0);
+      var x2 = cx + R*Math.cos(a1), y2 = cy + R*Math.sin(a1);
+      var ix1 = cx + r*Math.cos(a0), iy1 = cy + r*Math.sin(a0);
+      var ix2 = cx + r*Math.cos(a1), iy2 = cy + r*Math.sin(a1);
+      var large = sweep > Math.PI ? 1 : 0;
+      var d = "M"+x1+","+y1+" A"+R+","+R+" 0 "+large+",1 "+x2+","+y2+
+              " L"+ix2+","+iy2+" A"+r+","+r+" 0 "+large+",0 "+ix1+","+iy1+" Z";
+
+      var path = document.createElementNS(svgNS, "path");
+      path.setAttribute("d", d);
+      path.setAttribute("fill", color);
+      path.setAttribute("stroke", cssVar("--surface"));
+      path.setAttribute("stroke-width", "2");
+      path.style.cursor = "pointer";
+      (function(i, t){
+        function showTip(){
+          var c = cssVar(SERIES_COLORS[i % SERIES_COLORS.length]);
+          tooltip.innerHTML = '<div class="t-date">' + t + '</div><div class="t-row"><span class="t-dot" style="background:' + c + '"></span>' + fmtPct(rets[i]/100) + ' over 1yr</div>';
+          tooltip.style.left = "8px"; tooltip.style.top = "8px";
+          tooltip.classList.add("show");
+        }
+        path.addEventListener("mouseenter", showTip);
+        path.addEventListener("touchstart", showTip, {passive:true});
+        path.addEventListener("mouseleave", function(){ tooltip.classList.remove("show"); });
+      })(idx, t);
+      svg.appendChild(path);
+    });
+
+    var centerVal = document.createElementNS(svgNS, "text");
+    centerVal.setAttribute("x", cx); centerVal.setAttribute("y", cy - 2);
+    centerVal.setAttribute("text-anchor", "middle");
+    centerVal.setAttribute("font-size", "22"); centerVal.setAttribute("font-weight", "700");
+    centerVal.setAttribute("fill", portfolio.annReturn >= 0 ? cssVar("--good") : cssVar("--critical"));
+    centerVal.textContent = fmtPct(portfolio.annReturn);
+    svg.appendChild(centerVal);
+
+    var centerLabel = document.createElementNS(svgNS, "text");
+    centerLabel.setAttribute("x", cx); centerLabel.setAttribute("y", cy + 16);
+    centerLabel.setAttribute("text-anchor", "middle");
+    centerLabel.setAttribute("font-size", "10"); centerLabel.setAttribute("fill", cssVar("--muted"));
+    centerLabel.textContent = "portfolio, 1yr";
+    svg.appendChild(centerLabel);
+
+    box.appendChild(svg);
+    box.appendChild(tooltip);
+
+    tickers.forEach(function(t, idx){
+      var color = cssVar(SERIES_COLORS[idx % SERIES_COLORS.length]);
+      var ret = rets[idx];
+      var pctColor = ret >= 0 ? cssVar("--good") : cssVar("--critical");
+      var legendItem = document.createElement("div");
+      legendItem.className = "legend-item";
+      legendItem.style.display = "flex";
+      legendItem.style.justifyContent = "space-between";
+      legendItem.style.width = "100%";
+      legendItem.innerHTML = '<span class="legend-swatch" style="background:' + color + '"></span>' +
+        '<span style="flex:1;">' + t + '</span>' +
+        '<span style="font-weight:600;color:' + pctColor + '">' + fmtPct(ret/100) + '</span>';
+      legend.appendChild(legendItem);
+    });
+  }
+
+  function isMobileView(){
+    return !!(window.matchMedia && window.matchMedia("(max-width:640px)").matches);
+  }
+
+  function renderActiveChart(perTicker, tickers, portfolio){
+    var titleEl = document.getElementById("chartTitle");
+    lastIsMobile = isMobileView();
+    if (lastIsMobile){
+      if (titleEl) titleEl.textContent = "Return by pick — trailing 1 year";
+      renderPieChart(perTicker, tickers, portfolio);
+    } else {
+      if (titleEl) titleEl.textContent = "Normalized performance — trailing 1 year (indexed to 100)";
+      renderChart(perTicker, tickers);
+    }
+  }
+
   function renderDataTable(perTicker, tickers){
     var wrap = document.getElementById("dataTableWrap");
     var maxLen = Math.max.apply(null, tickers.map(function(t){ return perTicker[t].dates.length; }));
@@ -612,8 +733,9 @@ footer .wrap{font-size:.75rem; color:var(--muted); display:flex; justify-content
       statusMsg.classList.toggle("err", errors.length > 0);
 
       var portfolio = portfolioStats(perTicker, goodTickers);
+      lastPerTicker = perTicker; lastGoodTickers = goodTickers; lastPortfolio = portfolio;
       renderStats(perTicker, goodTickers, portfolio);
-      renderChart(perTicker, goodTickers);
+      renderActiveChart(perTicker, goodTickers, portfolio);
       renderDataTable(perTicker, goodTickers);
       renderRange(portfolio);
       renderPerTickerTable(perTicker, goodTickers);
@@ -637,6 +759,21 @@ footer .wrap{font-size:.75rem; color:var(--muted); display:flex; justify-content
     chartBox.style.display = showingTable ? "block" : "none";
     legend.style.display = showingTable ? "flex" : "none";
     this.textContent = showingTable ? "View as table" : "View as chart";
+  });
+
+  // re-render the chart (only) if the viewport crosses the mobile/desktop
+  // breakpoint, so rotating a phone or resizing a window switches chart type
+  var resizeTimer = null;
+  window.addEventListener("resize", function(){
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function(){
+      if (!lastGoodTickers) return;
+      var nowMobile = isMobileView();
+      if (nowMobile !== lastIsMobile){
+        lastIsMobile = nowMobile;
+        renderActiveChart(lastPerTicker, lastGoodTickers, lastPortfolio);
+      }
+    }, 150);
   });
 
   // default preset
